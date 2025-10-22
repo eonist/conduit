@@ -17,6 +17,8 @@ import { registerStyleCommands } from "./figma/style/index.js";
 import { registerSVGCommands } from "./figma/svg/index.js";
 import { registerTextCommands } from "./figma/text/index.js";
 import { registerVectorCommands } from "./figma/vector/index.js";
+// Advanced code export tool registration
+import { registerAdvancedCodeExportTool } from "../server/tools/advanced_code_export/index.js";
 /** 
  * Registers all tool commands with the given MCP server.
  *
@@ -26,6 +28,7 @@ import { registerVectorCommands } from "./figma/vector/index.js";
  * - Modify operations: move_node, resize_node, set_style, etc.
  * - Rename operations: rename_layer, rename_layers, ai_rename_layers, etc.
  * - Channel operations: join_channel
+ * - Advanced export tool: advanced_code_export
  *
  * @param {McpServer} server - The MCP server instance
  */
@@ -50,6 +53,8 @@ export function registerAllCommands(server: McpServer): void {
     registerSVGCommands(server, figmaClient);
     registerTextCommands(server, figmaClient);
     registerVectorCommands(server, figmaClient);
+    // Register advanced code export tool so it appears in tools/list and can be called
+    registerAdvancedCodeExportTool(server);
     logger.info(MCP_COMMANDS.SET_CORNER_RADIUS);
     logger.info("All commands registered successfully");
   } catch (error) {
@@ -57,4 +62,3 @@ export function registerAllCommands(server: McpServer): void {
     throw error;
   }
 }
- 
