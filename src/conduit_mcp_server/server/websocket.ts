@@ -1,41 +1,106 @@
 /**
- * WebSocket transport module for the Conduit MCP server.
+ * @file WebSocket transport module for the Conduit MCP server.
+ * @module server/websocket
  *
- * Manages connection lifecycle, command dispatch, response handling, and automatic reconnection.
+ * This module is responsible for establishing and managing the WebSocket connection
+ * to the Figma plugin. It handles the entire lifecycle of the connection, including:
+ * - Initial connection and automatic reconnection using {@link ReconnectingWebSocket}.
+ * - Joining specific communication channels within Figma.
+ * - Sending commands to Figma and tracking their responses using unique IDs.
+ * - Managing timeouts for requests.
+ * - Handling incoming messages, distinguishing between command results and progress updates.
+ * - Providing utility functions to check connection status and current channel.
  *
- * Exposes:
- *   - connectToFigma(serverUrl, port, reconnectInterval): void
- *   - joinChannel(channelName): Promise<void>
- *   - getCurrentChannel(): string | null
- *   - sendCommandToFigma(command, params, timeoutMs?): Promise<unknown>
- *   - processFigmaNodeResponse(result): any
- *   - isConnectedToFigma(): boolean
+ * It supports a "lazy connection" pattern where connection parameters can be set via
+ * {@link setConnectionConfig} and the actual connection is only established when a command
+ * needs to be sent (e.g., by {@link sendCommandToFigma}).
  *
- * @module websocket
+ * Key exposed functions:
+ * - {@link setConnectionConfig}: Stores connection parameters for later use.
+ * - {@link connectToFigma}: Initiates or manages the WebSocket connection.
+ * - {@link joinChannel}: Joins a named communication channel in Figma.
+ * - {@link getCurrentChannel}: Returns the name of the current Figma channel.
+ * - {@link sendCommandToFigma}: Sends a command to Figma and returns a Promise for the result.
+ * - {@link processFigmaNodeResponse}: (Currently for logging) Processes responses that appear to be Figma nodes.
+ * - {@link isConnectedToFigma}: Checks if the WebSocket connection is active.
+ *
  * @example
- * import { connectToFigma, sendCommandToFigma, onResponse } from './websocket.js';
- * connectToFigma('localhost', 3055, 2000);
- * const result = await sendCommandToFigma('get_document_info', {});
- * console.log(result);
+ * import { setConnectionConfig, connectToFigma, sendCommandToFigma, joinChannel } from './websocket.js';
+ *
+ * // Configure for lazy connection or direct connection
+ * setConnectionConfig('localhost', 3055, 2000);
+ * // Optionally, connect immediately:
+ * // connectToFigma('localhost', 3055, 2000);
+ *
+ * async function getDocumentInfo() {
+ *   try {
+ *     await joinChannel('my-figma-channel'); // Ensure connected and channel joined
+ *     const result = await sendCommandToFigma('get_document_info', {});
+ *     console.log(result);
+ *   } catch (error) {
+ *     console.error("Error getting document info:", error);
+ *   }
+ * }
+ * getDocumentInfo();
  */
+
 import WebSocket from "ws";
 import { ReconnectingWebSocket } from "../utils/reconnecting-websocket.js";
 import { v4 as uuidv4 } from "uuid";
 import { logger } from "../utils/logger.js";
 import { FigmaCommand, PendingRequest, WebSocketMessage } from "../types/commands.js";
 
-// WebSocket connection and request tracking
-let ws: any = null;
+/**
+ * The active WebSocket connection instance.
+ * It is an instance of {@link ReconnectingWebSocket} which handles automatic reconnections.
+ * @type {ReconnectingWebSocket | null}
+ */
+let ws: ReconnectingWebSocket | null = null;
+
+/**
+ * Stores the name of the currently joined Figma communication channel.
+ * Null if no channel is currently joined.
+ * @type {string | null}
+ */
 let currentChannel: string | null = null;
+
+/**
+ * A Map to store pending requests sent to Figma.
+ * The key is the unique request ID (string), and the value is a {@link PendingRequest} object,
+ * which includes `resolve` and `reject` functions for the Promise, a `timeout` timer ID,
+ * and a `lastActivity` timestamp.
+ * @type {Map<string, PendingRequest>}
+ */
 const pendingRequests = new Map<string, PendingRequest>();
 
-// Saved config for lazy connection
+/**
+ * Stores the server URL for lazy/on-demand WebSocket connections.
+ * Set by {@link setConnectionConfig}.
+ * @type {string}
+ */
 let savedServerUrl: string = "";
+/**
+ * Stores the port number for lazy/on-demand WebSocket connections.
+ * Set by {@link setConnectionConfig}.
+ * @type {number}
+ */
 let savedPort: number = 0;
+/**
+ * Stores the base reconnect interval (ms) for lazy/on-demand WebSocket connections.
+ * Set by {@link setConnectionConfig}.
+ * @type {number}
+ */
 let savedReconnectInterval: number = 0;
 
 /**
- * Store Figma socket connection parameters for on-demand connection.
+ * Stores WebSocket connection parameters (`serverUrl`, `port`, `reconnectInterval`)
+ * in module-level variables. These parameters can then be used by {@link connectToFigma}
+ * when a connection is initiated, often lazily on the first call to {@link sendCommandToFigma}.
+ *
+ * @param {string} serverUrl - The URL of the WebSocket server (e.g., 'localhost', 'example.com').
+ * @param {number} port - The port number for the WebSocket server.
+ * @param {number} reconnectInterval - The base interval in milliseconds for reconnection attempts.
+ * @returns {void}
  */
 export function setConnectionConfig(serverUrl: string, port: number, reconnectInterval: number): void {
   savedServerUrl = serverUrl;
@@ -43,313 +108,353 @@ export function setConnectionConfig(serverUrl: string, port: number, reconnectIn
   savedReconnectInterval = reconnectInterval;
 }
 
+
 /**
- * Manages WebSocket connection between the MCP server and Figma plugin.
- * Provides connection lifecycle management, command messaging, request tracking, and error recovery.
+ * Initializes or re-initializes the WebSocket connection to the Figma plugin
+ * using `ReconnectingWebSocket`. This function manages the WebSocket lifecycle,
+ * including handling existing connection states (already connected, connecting, closing/closed)
+ * and setting up event handlers for `open`, `message`, `error`, and `close` events.
  *
- * Module responsibilities:
- * - connectToFigma: Establish and maintain a WebSocket connection with exponential backoff.
- * - joinChannel: Join a dedicated Figma communication channel.
- * - sendCommandToFigma: Send commands to Figma with promise-based request tracking and timeouts.
- * - processFigmaNodeResponse: Filter and log Figma node responses.
- * - isConnectedToFigma: Check current connection status.
+ * - **On 'open'**: Logs the successful connection, clears any pending connection timeout,
+ *   and resets the `currentChannel` to null as a new connection might require rejoining.
+ * - **On 'message'**: Parses incoming JSON data. It first checks if the message is a
+ *   progress update using {@link handleProgressUpdate}. If not, it processes it as a
+ *   standard command response using {@link handleMessageResponse}. Includes error handling for JSON parsing.
+ * - **On 'error'**: Logs WebSocket errors. The `ReconnectingWebSocket` handles actual reconnection attempts.
+ * - **On 'close'**: Logs the disconnection, clears the `ws` instance, rejects all
+ *   `pendingRequests` with an error indicating the connection loss, and relies on
+ *   `ReconnectingWebSocket` to schedule and attempt reconnections.
  *
- * @module websocket
- */
-/*
- * Handles the full WebSocket connection lifecycle including:
- * 1. Initial connection attempt
- * 2. Connection state management 
- * 3. Automatic reconnection with exponential backoff
- * 4. Error handling and recovery
+ * A 10-second timeout is implemented for the initial connection attempt.
  *
- * @param {string} serverUrl - Server URL to connect to
- * @param {number} port - Port number to connect to
- * @param {number} reconnectInterval - Base interval for reconnection attempts
- * 
- * @throws Logs errors but handles them internally without throwing
+ * @param {string} serverUrl - The URL of the WebSocket server (e.g., 'localhost').
+ * @param {number} port - The port number for the WebSocket server.
+ * @param {number} reconnectInterval - The base interval in milliseconds for reconnection attempts,
+ *                                   used by `ReconnectingWebSocket`.
+ * @returns {void}
+ * @throws This function logs errors internally but is designed not to throw, allowing
+ *         `ReconnectingWebSocket` to manage recovery.
  */
 export function connectToFigma(serverUrl: string, port: number, reconnectInterval: number): void {
   // If already connected, do nothing
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (ws && ws.getReadyState() === WebSocket.OPEN) {
     logger.info('Already connected to Figma');
     return;
   }
 
   // If connection is in progress (CONNECTING state), wait
-  if (ws && ws.readyState === WebSocket.CONNECTING) {
+  if (ws && ws.getReadyState() === WebSocket.CONNECTING) {
     logger.info('Connection to Figma is already in progress');
     return;
   }
 
-  // If there's an existing socket in a closing state, clean it up
-  if (ws && (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED)) {
-    ws.removeAllListeners();
+  // If there's an existing socket instance, ensure it's properly closed before creating a new one.
+  if (ws) {
+    logger.info('Cleaning up existing WebSocket instance before reconnecting.');
+    ws.removeAllListeners(); // Remove listeners to prevent memory leaks
+    if (ws.getReadyState() !== WebSocket.CLOSED) {
+      ws.terminate(); // Force close if not already closed
+    }
     ws = null;
   }
 
   const wsUrl = serverUrl === 'localhost' ? `ws://${serverUrl}:${port}` : `wss://${serverUrl}`;
-  logger.info(`Connecting to Figma socket server at ${wsUrl}...`);
-  
+  logger.info(`Attempting to connect to Figma socket server at ${wsUrl}...`);
+
   try {
     ws = new ReconnectingWebSocket(wsUrl, {
-      maxReconnectAttempts: 5,
-      initialDelay: reconnectInterval,
-      maxDelay: 30000
+      maxReconnectAttempts: 5, // Example: Max 5 quick retries
+      initialDelay: reconnectInterval, // Initial delay for first retry
+      maxDelay: 30000, // Max delay between retries (e.g., 30 seconds)
+      WebSocket: WebSocket, // Pass the WebSocket implementation
     });
-    
-    // Add connection timeout
+
+    // Add connection timeout for the initial connection attempt
     const connectionTimeout = setTimeout(() => {
-      if (ws && ws.readyState === WebSocket.CONNECTING) {
-        logger.error('Connection to Figma timed out');
-        ws.terminate();
+      if (ws && ws.getReadyState() === WebSocket.CONNECTING) {
+        logger.error('Initial connection attempt to Figma timed out after 10 seconds.');
+        ws.terminate(); // This will trigger the 'close' event, and ReconnectingWebSocket will handle retries.
       }
-    }, 10000); // 10 second connection timeout
+    }, 10000); // 10-second connection timeout
 
     ws.on('open', () => {
-      clearTimeout(connectionTimeout);
-      logger.info('Connected to Figma socket server');
-      // Reset channel on new connection
+      clearTimeout(connectionTimeout); // Clear the initial connection timeout
+      logger.info('Successfully connected to Figma socket server.');
+      // Reset channel on new connection, as the previous channel context is lost.
       currentChannel = null;
     });
 
-    ws.on("message", (data: any) => {
+    ws.on("message", (data: WebSocket.Data) => {
       try {
-        // Attempt to parse the incoming data as JSON.
-        const json = JSON.parse(data) as {
-          type?: string;
-          id?: string;
-          message: any;
-          result?: any;
-          error?: any;
-          [key: string]: any;
-        };
-        
-        logger.debug(`Raw WS message: ${JSON.stringify(json)}`);
+        const messageStr = data.toString();
+        const json = JSON.parse(messageStr) as WebSocketMessage; // Using WebSocketMessage type
 
-        // Handle progress updates
+        logger.debug(`Raw WS message received: ${messageStr}`);
+
+        // Prioritize handling progress updates as they might occur during a long command.
         if (handleProgressUpdate(json)) {
-          return;
+          return; // Message was a progress update and has been handled.
         }
 
-        // Handle message responses in a structured way
+        // If not a progress update, handle as a standard message response.
         if (handleMessageResponse(json)) {
-          return;
+          return; // Message was a command response and has been handled.
         }
+
+        // If the message was neither a progress update nor a recognized command response.
+        // logger.warn(`Received unhandled or broadcast message: ${messageStr}`);
 
       } catch (error) {
-        // Log error details if JSON parsing or any processing fails.
-        logger.error(`Error parsing message: ${error instanceof Error ? error.message : String(error)}`);
+        logger.error(`Error parsing incoming WebSocket message: ${error instanceof Error ? error.message : String(error)}. Data: ${data.toString()}`);
       }
     });
-
+    
     /**
-     * Handle progress update messages
-     * @param json The parsed JSON message
-     * @returns true if this was a progress update and was handled
+     * Handles incoming messages specifically identified as progress updates.
+     * These messages are expected to have `type: 'progress_update'`.
+     * It updates the `lastActivity` timestamp for the corresponding pending request
+     * and extends its timeout to prevent premature failure of long-running commands.
+     *
+     * @param {WebSocketMessage} jsonMessage - The parsed JSON message object from WebSocket.
+     * @returns {boolean} True if the message was a progress update and was processed, false otherwise.
      */
-    function handleProgressUpdate(json: any): boolean {
-      if (json.type !== 'progress_update') {
+    function handleProgressUpdate(jsonMessage: WebSocketMessage): boolean {
+      if (jsonMessage.type !== 'progress_update') {
         return false;
       }
 
-      const progressData = json.message?.data;
-      const requestId = json.id || '';
+      // Assuming progress data is nested within jsonMessage.message.data as per original logic
+      const progressData = jsonMessage.message?.data as { commandType?: string, progress?: number, message?: string, status?: string };
+      const requestId = jsonMessage.id || (jsonMessage.message?.id as string);
+
 
       if (!requestId || !pendingRequests.has(requestId) || !progressData) {
-        return true; // Still a progress update but we couldn't process it
+        logger.warn(`Could not process progress update: Missing ID, pending request, or progress data. ID: ${requestId}`);
+        return true; // Still considered handled as it matched type 'progress_update'
       }
 
       const request = pendingRequests.get(requestId)!;
-      
-      // Update activity timestamp and extend timeout
+
       request.lastActivity = Date.now();
       clearTimeout(request.timeout);
+      // Extend timeout for another 60 seconds from this progress update
       request.timeout = setTimeout(() => {
         if (pendingRequests.has(requestId)) {
-          logger.error(`Request ${requestId} timed out after extended period of inactivity`);
+          logger.error(`Request ${requestId} (command: ${progressData.commandType || 'unknown'}) timed out after extended period of inactivity following a progress update.`);
           pendingRequests.delete(requestId);
-          request.reject(new Error('Request to Figma timed out'));
+          request.reject(new Error(`Request to Figma (command: ${progressData.commandType || 'unknown'}) timed out after progress update.`));
         }
       }, 60000); // 60-second timeout extension
 
-      // Log progress update
-      logger.info(`Progress update for ${progressData.commandType}: ${progressData.progress}% - ${progressData.message}`);
+      logger.info(`Progress for ${progressData.commandType || requestId}: ${progressData.progress || 0}% - ${progressData.message || 'In progress...'}`);
 
-      // Note completion
       if (progressData.status === 'completed' && progressData.progress === 100) {
-        logger.info(`Operation ${progressData.commandType} completed, waiting for final result`);
+        logger.info(`Operation ${progressData.commandType || requestId} reported 100% completion via progress update, awaiting final result message.`);
       }
-
       return true;
     }
-    
-    /**
-     * Handle message responses in a structured way
-     * @param json The parsed JSON message 
-     * @returns true if a matching request was found and resolved
-     */
-    function handleMessageResponse(json: any): boolean {
-      // Extract key message components
-      const jsonId = json.id;
-      const messageObj = json.message;
-      const messageId = messageObj?.id;
-      const jsonResult = json.result;
-      const messageResult = messageObj?.result;
-      const jsonError = json.error;
-      const messageError = messageObj?.error;
-      const commandType = messageObj?.command;
 
-      // Case 1: Direct result structure (most common)
-      if (jsonId && pendingRequests.has(jsonId) && jsonResult !== undefined) {
-        resolveRequest(jsonId, jsonResult, jsonError, 'direct');
+    /**
+     * Handles general message responses from the WebSocket (i.e., not progress updates).
+     * It attempts to match incoming messages with pending requests using various strategies:
+     * direct ID match, nested ID in `message.id`, fuzzy ID matching, special handling for
+     * document info, and finally, command type matching as a last resort.
+     * Once a match is found, it calls {@link resolveRequest}.
+     *
+     * @param {WebSocketMessage} jsonMessage - The parsed JSON message object from WebSocket.
+     * @returns {boolean} True if a matching request was found and resolved/rejected, false otherwise.
+     */
+    function handleMessageResponse(jsonMessage: WebSocketMessage): boolean {
+      const topLevelId = jsonMessage.id;
+      const nestedMessage = jsonMessage.message;
+      const nestedMessageId = nestedMessage?.id as string | undefined;
+      const topLevelResult = jsonMessage.result;
+      const nestedMessageResult = nestedMessage?.result;
+      const topLevelError = jsonMessage.error;
+      const nestedMessageError = nestedMessage?.error;
+      const commandTypeInMessage = nestedMessage?.command as string | undefined; // e.g. 'get_document_info'
+
+      // Strategy 1: Direct ID match with result/error at the top level.
+      if (topLevelId && pendingRequests.has(topLevelId) && (topLevelResult !== undefined || topLevelError !== undefined)) {
+        resolveRequest(topLevelId, topLevelResult, topLevelError, 'direct');
+        return true;
+      }
+
+      // Strategy 2: Direct ID match with result/error nested in `message` object.
+      if (topLevelId && pendingRequests.has(topLevelId) && (nestedMessageResult !== undefined || nestedMessageError !== undefined)) {
+        resolveRequest(topLevelId, nestedMessageResult, nestedMessageError, 'nested_direct_id');
         return true;
       }
       
-      // Case 2: Result in message field
-      if (jsonId && pendingRequests.has(jsonId) && messageResult !== undefined) {
-        resolveRequest(jsonId, messageResult, messageError, 'message');
+      // Strategy 3: Nested `message.id` matches a pending request, result/error in `message` object.
+      if (nestedMessageId && pendingRequests.has(nestedMessageId) && (nestedMessageResult !== undefined || nestedMessageError !== undefined)) {
+        resolveRequest(nestedMessageId, nestedMessageResult, nestedMessageError, 'nested_message_id');
         return true;
       }
-      
-      // Case 3: Nested ID in message matches a request
-      if (messageId && pendingRequests.has(messageId) && messageResult !== undefined) {
-        resolveRequest(messageId, messageResult, messageError, 'nested');
-        return true;
+
+      // Strategy 4: Top-level ID matches, and `message` object itself is the result.
+      if (topLevelId && pendingRequests.has(topLevelId) && typeof nestedMessage === 'object' && nestedMessage !== null && nestedMessageResult === undefined && nestedMessageError === undefined) {
+        // Avoid resolving with an empty message or message that's just an ID container
+        if (Object.keys(nestedMessage).length > 1 || (Object.keys(nestedMessage).length === 1 && !nestedMessage.id)) {
+            resolveRequest(topLevelId, nestedMessage, undefined, 'object_as_result');
+            return true;
+        }
       }
       
-      // Case 4: Message is a general object response
-      if (jsonId && pendingRequests.has(jsonId) && typeof messageObj === 'object' && messageObj !== null) {
-        resolveRequest(jsonId, messageObj, undefined, 'object');
-        return true;
+      // Strategy 5: Fuzzy ID matching (if topLevelId is a substring of a pending ID or vice-versa).
+      if (topLevelId) {
+        for (const [pendingId] of pendingRequests.entries()) {
+          if (pendingId.includes(topLevelId) || topLevelId.includes(pendingId)) {
+            if (topLevelResult !== undefined || nestedMessageResult !== undefined || topLevelError !== undefined || nestedMessageError !== undefined) {
+              resolveRequest(pendingId, topLevelResult || nestedMessageResult, topLevelError || nestedMessageError, 'fuzzy_id');
+              return true;
+            }
+          }
+        }
       }
       
-      // Case 5: Fuzzy ID matching (for partial/mismatched IDs)
-      for (const [id, request] of pendingRequests.entries()) {
-        if ((jsonId && id.includes(jsonId)) || (jsonId && jsonId.includes(id))) {
-          if (messageResult !== undefined || jsonResult !== undefined) {
-            resolveRequest(id, messageResult || jsonResult, messageError || jsonError, 'fuzzy');
+      // Strategy 6: Heuristic for document info responses (often lack a clear request ID link).
+      // This assumes `message.result` contains typical document structure.
+      const potentialDocInfo = nestedMessageResult || topLevelResult;
+      if (typeof potentialDocInfo === 'object' && potentialDocInfo?.type === "PAGE" && Array.isArray(potentialDocInfo?.children)) {
+        for (const [pendingId, request] of pendingRequests.entries()) {
+          // Assuming document info commands might contain these substrings
+          if (pendingId.toLowerCase().includes("document_info") || pendingId.toLowerCase().includes("get_document")) {
+            resolveRequest(pendingId, potentialDocInfo, undefined, 'heuristic_document_info');
             return true;
           }
         }
       }
       
-      // Case 6: Looks like document info response
-      if (messageResult?.id && messageResult?.type === "PAGE" && messageResult?.children) {
-        for (const [id, request] of pendingRequests.entries()) {
-          if (id.includes("document_info") || id.includes("get_document")) {
-            resolveRequest(id, messageResult, undefined, 'document_info');
-            return true;
+      // Strategy 7: Command type matching (last resort if ID matching fails).
+      // This is risky if multiple commands of the same type are pending.
+      if (commandTypeInMessage && pendingRequests.size > 0) {
+        let mostRecentMatchingRequest: { id: string, request: PendingRequest } | null = null;
+        for (const [pendingId, request] of pendingRequests.entries()) {
+          // A simple check, assuming command name might be part of the auto-generated pendingId or stored metadata
+          if (pendingId.toLowerCase().includes(commandTypeInMessage.toLowerCase())) {
+            if (!mostRecentMatchingRequest || request.lastActivity > mostRecentMatchingRequest.request.lastActivity) {
+              mostRecentMatchingRequest = { id: pendingId, request };
+            }
           }
         }
-      }
-      
-      // Case 7: Command type matching (last resort)
-      if (commandType && pendingRequests.size > 0) {
-        // Find most recent pending request of this command type
-        let matchedId = null;
-        let mostRecentTime = 0;
-        
-        for (const [id, request] of pendingRequests.entries()) {
-          if (request.lastActivity > mostRecentTime && id.includes(commandType)) {
-            mostRecentTime = request.lastActivity;
-            matchedId = id;
-          }
-        }
-        
-        if (matchedId) {
-          const result = messageResult || jsonResult || { success: true, command: commandType };
-          resolveRequest(matchedId, result, messageError || jsonError, 'command_type');
+        if (mostRecentMatchingRequest) {
+          const resultToUse = nestedMessageResult || topLevelResult || { success: true, command: commandTypeInMessage, note: "Result inferred by command type match" };
+          resolveRequest(mostRecentMatchingRequest.id, resultToUse, nestedMessageError || topLevelError, 'command_type_match');
           return true;
         }
       }
       
-      // No matching request found
-      logger.info(`Received broadcast or unmatched message: ${JSON.stringify(json)}`);
+      logger.warn(`Received message not matched to any pending request: ${JSON.stringify(jsonMessage)}`);
       return false;
     }
-    
+
     /**
-     * Helper to resolve a request with proper cleanup
+     * Resolves or rejects a pending request and cleans up associated resources.
+     * It clears the timeout timer for the request and removes it from the `pendingRequests` map.
+     *
+     * @param {string} id - The unique ID of the request to resolve/reject.
+     * @param {any} result - The result data to resolve the promise with (if successful).
+     * @param {any} error - The error data to reject the promise with (if failed).
+     * @param {string} matchType - A descriptive string indicating how the response was matched to the request (for logging).
+     * @returns {void}
      */
     function resolveRequest(id: string, result: any, error: any, matchType: string): void {
-      if (!pendingRequests.has(id)) return;
+      if (!pendingRequests.has(id)) {
+        logger.warn(`Attempted to resolve request ${id} (${matchType}), but it was not found in pendingRequests. It might have already timed out or been resolved.`);
+        return;
+      }
       
       const request = pendingRequests.get(id)!;
-      clearTimeout(request.timeout);
+      clearTimeout(request.timeout); // Clear the timeout timer.
       
       if (error) {
-        logger.error(`Error from Figma (${matchType}): ${error}`);
-        request.reject(new Error(typeof error === 'string' ? error : JSON.stringify(error)));
+        const errorMessage = typeof error === 'string' ? error : JSON.stringify(error);
+        logger.error(`Request ${id} failed (${matchType}): ${errorMessage}`);
+        request.reject(new Error(errorMessage));
       } else {
-        logger.info(`Resolving request ${id} with ${matchType} result`);
+        logger.info(`Request ${id} succeeded (${matchType}). Resolving promise.`);
+        logger.debug(`Result for ${id}: ${JSON.stringify(result)}`);
         request.resolve(result);
       }
       
-      pendingRequests.delete(id);
+      pendingRequests.delete(id); // Remove from pending requests map.
     }
 
-    ws.on('error', (error: any) => {
-      // Log the WebSocket error detail to indicate an error occurred.
-      logger.error(`Socket error: ${error}`);
-      // Note: Do not attempt reconnection here; let the close event handle reconnection.
+    ws.on('error', (errorEvent: WebSocket.ErrorEvent) => {
+      logger.error(`WebSocket error: ${errorEvent.message}. Type: ${errorEvent.type}`);
+      // `ReconnectingWebSocket` will typically handle the 'close' event that follows an error
+      // and attempt reconnection based on its configuration. No need to manually reconnect here.
+      // If `connectionTimeout` is active, it might also be cleared if the error leads to a quick close.
     });
 
-    ws.on('close', (code: any, reason: any) => {
-      // Clear the connection timeout in case it is still pending.
-      clearTimeout(connectionTimeout);
-      logger.info(`Disconnected from Figma socket server with code ${code} and reason: ${reason || 'No reason provided'}`);
-      ws = null;
+    ws.on('close', (code: number, reasonBuffer: Buffer) => {
+      clearTimeout(connectionTimeout); // Ensure initial connection timeout is cleared on close.
+      const reason = reasonBuffer.toString();
+      logger.info(`Disconnected from Figma socket server. Code: ${code}, Reason: ${reason || 'No reason provided'}.`);
+      
+      // It's important NOT to set ws = null here if using ReconnectingWebSocket,
+      // as the instance itself manages its state and reconnection attempts.
+      // ReconnectingWebSocket will emit 'close' and then attempt to reconnect.
 
-      // Reject all pending requests since the connection is lost.
+      // Reject all pending requests as the connection is lost.
+      // ReconnectingWebSocket might re-establish, but current outstanding requests are failed.
       for (const [id, request] of pendingRequests.entries()) {
         clearTimeout(request.timeout);
-        request.reject(new Error(`Connection closed with code ${code}: ${reason || 'No reason provided'}`));
-        pendingRequests.delete(id);
+        request.reject(new Error(`Connection lost (Code: ${code}, Reason: ${reason || 'N/A'}). Request ${id} failed.`));
       }
+      pendingRequests.clear(); // Clear all pending requests.
 
-      // Calculate exponential backoff delay before attempting a reconnection.
-      const backoff = Math.min(30000, reconnectInterval * Math.pow(1.5, Math.floor(Math.random() * 5))); // Max 30s
-      logger.info(`Attempting to reconnect in ${backoff / 1000} seconds...`);
-      setTimeout(() => {
-        // Only reconnect if no new connection has been started in the meantime
-        if (!ws) {
-          connectToFigma(serverUrl, port, reconnectInterval);
-        } else {
-          logger.info('Reconnect aborted: connection already established or in progress.');
-        }
-      }, backoff);
+      // Reconnection logic is handled by ReconnectingWebSocket internally.
+      // No explicit setTimeout for reconnection needed here.
+      // If `ws` was manually terminated (e.g. in timeout), ReconnectingWebSocket might stop,
+      // otherwise it continues based on its `maxReconnectAttempts` etc.
+      if (code === 1000 || code === 1005) { // Normal closure or no status
+        logger.info("WebSocket closed normally.");
+      } else {
+        logger.warn(`WebSocket closed unexpectedly. ReconnectingWebSocket will attempt to reconnect if configured.`);
+      }
     });
-    
+
   } catch (error) {
-    logger.error(`Failed to create WebSocket connection: ${error instanceof Error ? error.message : String(error)}`);
-    // Attempt to reconnect after a delay
-    setTimeout(() => connectToFigma(serverUrl, port, reconnectInterval), reconnectInterval);
+    logger.error(`Failed to create ReconnectingWebSocket instance: ${error instanceof Error ? error.message : String(error)}`);
+    // If ReconnectingWebSocket constructor itself fails, we might need a fallback retry here,
+    // though it's less common.
+    if (!ws) { // Ensure ws is null so subsequent calls might retry.
+        logger.info(`Attempting to re-initiate connection process in ${reconnectInterval / 1000}s due to constructor failure.`);
+        setTimeout(() => connectToFigma(serverUrl, port, reconnectInterval), reconnectInterval);
+    }
   }
 }
 
 /**
- * Joins a specific Figma communication channel.
- * 
- * Establishes a dedicated channel for communicating with the Figma plugin.
- * The channel is required for most commands except the initial join.
+ * Joins a specific communication channel in Figma.
  *
- * @param {string} channelName - Name of the channel to join
- * @returns {Promise<void>} Resolves when channel is joined successfully
- * 
- * @throws {Error} If not connected to Figma or channel join fails
+ * This function sends a "join" command to the Figma plugin. Most other commands
+ * require a channel to be established first. If the WebSocket is not currently connected,
+ * this function will throw an error.
+ *
+ * @param {string} channelName - The desired name for the communication channel.
+ * @returns {Promise<void>} A promise that resolves when the channel is successfully joined,
+ *                          or rejects if the join command fails or if not connected.
+ * @throws {Error} If the WebSocket is not connected to Figma, or if the "join" command to Figma fails.
  */
 export async function joinChannel(channelName: string): Promise<void> {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    throw new Error("Not connected to Figma");
+  if (!ws || ws.getReadyState() !== WebSocket.OPEN) {
+    // Consider attempting a lazy connect here if desired, or ensure connectToFigma is called prior.
+    // For now, it strictly requires an active connection.
+    logger.error("Cannot join channel: Not connected to Figma.");
+    throw new Error("Not connected to Figma. Please connect before joining a channel.");
   }
 
   try {
-    await sendCommandToFigma("join", { channel: channelName });
-    currentChannel = channelName;
-    logger.info(`Joined channel: ${channelName}`);
+    // The "join" command is a special case for sendCommandToFigma that doesn't require a currentChannel.
+    await sendCommandToFigma("join" as FigmaCommand, { channel: channelName }); // Cast to FigmaCommand if "join" is part of it
+    currentChannel = channelName; // Set the current channel globally upon successful join.
+    logger.info(`Successfully joined Figma channel: ${channelName}`);
   } catch (error) {
-    logger.error(`Failed to join channel: ${error instanceof Error ? error.message : String(error)}`);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error(`Failed to join Figma channel "${channelName}": ${errorMessage}`);
     throw error;
   }
 }

@@ -1,83 +1,119 @@
 /**
- * UI Controller for the Conduit MCP Figma plugin.
- * Handles UI state updates and interactions.
+ * @file UI Controller for the Conduit MCP Figma plugin.
+ * @module UIController
+ * This script is responsible for initializing and managing the User Interface elements
+ * of the Figma plugin. It bridges the HTML elements with the JavaScript logic by:
+ * - Obtaining references to key UI elements from the DOM.
+ * - Setting up event listeners for user interactions (e.g., button clicks, toggle changes).
+ * - Updating the UI display based on the application's state (e.g., connection status, progress updates).
+ * It relies on functions from `connection.js` (like `connectToServer`, `disconnectFromServer`)
+ * and interacts with the global `pluginState` defined in `state.js`.
  */
 
 
 /**
- * Reference to the port input element.
+ * Reference to the port input HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLInputElement|undefined}
  */
 let portInput;
 
 /**
- * Reference to the connect button element.
+ * Reference to the connect/disconnect button HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLButtonElement|undefined}
  */
 let connectButton;
 
 /**
- * Reference to the copy channel button element.
+ * Reference to the copy channel ID button HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLButtonElement|undefined}
  */
 let copyChannelButton;
 
 /**
- * Reference to the connection status element.
+ * Reference to the connection status display HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLElement|undefined}
  */
 let connectionStatus;
 
 /**
- * Reference to the auto-reconnect toggle element.
+ * Reference to the auto-reconnect toggle (checkbox) HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLInputElement|undefined}
  */
 let autoReconnectToggle;
 
 /**
- * Reference to the progress container element.
+ * Reference to the progress container HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLElement|undefined}
  */
 let progressContainer;
 
 /**
- * Reference to the progress bar element.
+ * Reference to the progress bar fill HTML element (the inner bar that shows percentage).
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLElement|undefined}
  */
 let progressBar;
 
 /**
- * Reference to the progress message element.
+ * Reference to the progress message display HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLElement|undefined}
  */
 let progressMessage;
 
 /**
- * Reference to the progress status element.
+ * Reference to the progress status text HTML element (e.g., "Started", "In Progress", "Completed").
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLElement|undefined}
  */
 let progressStatus;
 
 /**
- * Reference to the progress percentage element.
+ * Reference to the progress percentage display HTML element.
+ * Initialized by {@link initUIElements}.
  * @global
  * @type {HTMLElement|undefined}
  */
 let progressPercentage;
 
 /**
- * Initializes UI elements and sets up event listeners for the plugin UI.
- * Queries the DOM for UI elements, assigns them to global variables, and sets up event listeners for user interaction.
- * Side effects: Modifies DOM, sets global variables, and triggers connection logic.
+ * Initializes references to UI elements from the DOM and sets up core event listeners.
+ *
+ * This function performs the following setup tasks:
+ * - Populates global variables (e.g., `portInput`, `connectButton`, `progressContainer`)
+ *   with their corresponding DOM element references using `document.getElementById`.
+ * - Attaches an event listener to `connectButton`:
+ *   - If connected, it calls `disconnectFromServer()`.
+ *   - If disconnected, it calls `connectToServer()` with the port from `portInput`.
+ *   - Updates UI status messages accordingly during these operations.
+ * - Attaches an event listener to `copyChannelButton`:
+ *   - Copies the current `pluginState.connection.channel` ID to the clipboard.
+ *   - Sends a "notify" message to the Figma plugin backend to show a confirmation.
+ * - Attaches an event listener to `autoReconnectToggle`:
+ *   - Updates `pluginState.connection.autoReconnect` based on the toggle's checked state.
+ *   - If toggled on and not connected, attempts to connect.
+ *   - If toggled off, clears any pending reconnection timers.
+ *   - Updates the `connectButton`'s disabled state.
+ * - Initializes the `autoReconnectToggle`'s checked state from `pluginState.connection.autoReconnect`.
+ * - Initializes the `connectButton`'s disabled state based on the auto-reconnect setting.
+ * - If auto-reconnect is enabled at startup and the plugin is not connected, it triggers
+ *   an initial connection attempt.
+ *
  * @returns {void}
  */
 function initUIElements() {
@@ -222,10 +258,16 @@ function initUIElements() {
 }
 
 /**
- * Updates the connection status UI elements based on the current connection state.
- * Updates status text, button states, and channel info.
- * @param {boolean} isConnected - Whether the plugin is currently connected.
- * @param {string} [message] - Optional status message to display.
+ * Updates the UI elements related to the WebSocket connection status.
+ * This function modifies the display text, CSS classes, and disabled states of various
+ * UI elements like the status message, connect/disconnect button, copy channel button,
+ * and port input field based on the provided connection state.
+ * It also updates `pluginState.connection.connected`.
+ *
+ * @param {boolean} isConnected - True if the WebSocket is connected, false otherwise.
+ * @param {string} [message] - An optional message to display in the connection status area.
+ *                             If not provided, a default message based on `isConnected`
+ *                             and `pluginState.connection.channel` will be used.
  * @returns {void}
  */
 function updateConnectionStatus(isConnected, message) {
@@ -266,9 +308,18 @@ function updateConnectionStatus(isConnected, message) {
 }
 
 /**
- * Updates the progress UI elements based on the provided progress data.
- * Shows/hides the progress container, updates bar, message, and status.
- * @param {object} progressData - Progress information (should include progress, message, status).
+ * Updates the UI elements dedicated to displaying the progress of an operation.
+ * This includes making the progress container visible, setting the width of the
+ * progress bar, and updating text elements for the progress message, percentage, and status.
+ * If the `progressData.status` is 'completed', it schedules the progress container to
+ * be hidden after a 5-second delay.
+ *
+ * @param {object} progressData - An object containing progress information.
+ * @param {number} [progressData.progress=0] - The progress percentage (0-100), used for the
+ *                                             progress bar width and percentage text.
+ * @param {string} [progressData.message="Operation in progress"] - A message describing the current operation.
+ * @param {'started'|'in_progress'|'completed'|'error'} [progressData.status] - The status of the operation,
+ *                               which affects the status text and its styling.
  * @returns {void}
  */
 function updateProgressUI(progressData) {

@@ -4,13 +4,19 @@
  */
 
 /**
- * Detects current Figma theme and sets up observer for theme changes.
- * Applies theme classes to the body element and updates on-the-fly.
+ * Detects the current Figma UI theme (light or dark) by observing class changes
+ * on the `document.documentElement` (e.g., 'figma-dark', 'figma-light').
+ * It then applies a corresponding 'theme-dark' or 'theme-light' class to the
+ * `document.body` to allow the plugin UI to match Figma's theme.
+ * This function also sets up a MutationObserver to react to live theme changes
+ * made by the user in Figma's settings.
  */
 function setupThemeDetection() {
   /**
-   * Handles theme changes by updating the body class based on Figma's theme.
-   * Adds/removes 'theme-light' or 'theme-dark' classes on the body.
+   * Handles theme changes by inspecting the class list of `document.documentElement`
+   * to determine if Figma's dark theme is active. It then updates the `document.body`
+   * by adding either 'theme-light' or 'theme-dark' class and removing the other,
+   * ensuring the plugin's UI matches the Figma environment.
    * @returns {void}
    */
   function handleThemeChange() {
@@ -32,9 +38,12 @@ function setupThemeDetection() {
   handleThemeChange();
   
   /**
-   * MutationObserver callback to detect changes to the HTML element's class attribute.
-   * Triggers theme update if the class attribute changes.
-   * @param {MutationRecord[]} mutations - List of mutations observed.
+   * The callback function for the MutationObserver. This function is executed
+   * whenever an observed mutation occurs on `document.documentElement`.
+   * It specifically checks if the `class` attribute was changed, which
+   * indicates a potential Figma theme change, and if so, calls `handleThemeChange`
+   * to update the plugin's theme accordingly.
+   * @param {MutationRecord[]} mutations - An array of MutationRecord objects describing each change that occurred.
    * @returns {void}
    */
   const observer = new MutationObserver((mutations) => {
@@ -50,8 +59,14 @@ function setupThemeDetection() {
 }
 
 /**
- * Initializes all UI components and event listeners when the DOM is loaded.
- * Sets up UI elements, tab navigation, message listener, and theme detection.
+ * Event listener for the 'DOMContentLoaded' event.
+ * This function is executed once the initial HTML document has been completely loaded and parsed,
+ * without waiting for stylesheets, images, and subframes to finish loading.
+ * It serves as the main entry point for initializing the plugin's UI by calling:
+ * - `initUIElements()`: To set up references to various UI elements.
+ * - `initTabNavigation()`: To enable tabbed navigation within the plugin.
+ * - `initMessageListener()`: To establish communication with the plugin's backend (main.ts).
+ * - `setupThemeDetection()`: To detect and apply Figma's current theme to the plugin UI.
  * @listens DOMContentLoaded
  */
 document.addEventListener('DOMContentLoaded', () => {

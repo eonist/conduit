@@ -1,11 +1,31 @@
+/**
+ * @file Command Registration Index for Conduit MCP Server.
+ * @module CommandRegistry
+ *
+ * This module serves as the central point for registering all Figma-related commands
+ * that the Conduit MCP server will expose and handle. It achieves this by:
+ * 1. Importing various specialized command registration functions from subdirectories
+ *    (e.g., `./figma/document/`, `./figma/shape/`, `./figma/text/`, etc.).
+ * 2. Importing the main `McpServer` class from the Model Context Protocol SDK and the
+ *    `FigmaClient` for interacting with the Figma plugin.
+ * 3. Providing the main {@link registerAllCommands} function, which orchestrates the
+ *    registration of all command categories.
+ *
+ * The `registerAllCommands` function instantiates a `FigmaClient` and passes it along
+ * with the `McpServer` instance to each specific `register...Commands` function.
+ * This allows each command group to define its commands and how they interact with
+ * Figma via the `FigmaClient`.
+ */
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { FigmaClient } from "../clients/figma-client/index.js";
+import { FigmaClient } from "../clients/figma-client/index.js"; // Corrected path if figma-client has an index.ts
 import { registerChannelCommand } from "./channel.js";
-import { CommandResult, MCP_COMMANDS } from "../types/commands.js";
+import { CommandResult, MCP_COMMANDS } from "../types/commands.js"; // MCP_COMMANDS might be used for logging or checks
 import { logger } from "../utils/logger.js";
-// register
+
+// Import all specific command registration functions
 import { registerComponentCommands } from "./figma/component/index.js";
-import { registerDocumnentCommands } from "./figma/document/index.js";
+import { registerDocumnentCommands } from "./figma/document/index.js"; // Typo: Documnent -> Document
 import { registerExportCommands } from "./figma/export/index.js";
 import { registerImageCommands } from "./figma/image/index.js";
 import { registerLayoutCommands } from "./figma/layout/index.js";
@@ -17,28 +37,37 @@ import { registerStyleCommands } from "./figma/style/index.js";
 import { registerSVGCommands } from "./figma/svg/index.js";
 import { registerTextCommands } from "./figma/text/index.js";
 import { registerVectorCommands } from "./figma/vector/index.js";
-/** 
- * Registers all tool commands with the given MCP server.
+
+/**
+ * Registers all available Figma-related commands with the provided MCP server instance.
  *
- * Sets up:
- * - Read operations: get_document_info, get_selection, get_node_info, etc.
- * - Create operations: create_rectangle, create_text, etc.
- * - Modify operations: move_node, resize_node, set_style, etc.
- * - Rename operations: rename_layer, rename_layers, ai_rename_layers, etc.
- * - Channel operations: join_channel
+ * This function orchestrates the command registration process by:
+ * 1. Creating a new instance of `FigmaClient`.
+ * 2. Calling a series of specialized `register...Commands` functions, each responsible for
+ *    a specific category of Figma commands (e.g., document manipulation, shape creation,
+ *    text editing, layout adjustments, etc.).
+ * 3. Each specialized registration function is passed both the `McpServer` instance (to register
+ *    commands with) and the `FigmaClient` instance (to enable command execution against Figma).
  *
- * @param {McpServer} server - The MCP server instance
+ * This setup allows for a modular approach to defining and registering commands.
+ *
+ * @param {McpServer} server - The MCP server instance (from `@modelcontextprotocol/sdk`)
+ *                             to which all commands will be registered.
+ * @returns {void}
+ * @throws {Error} If any error occurs during the instantiation of `FigmaClient` or
+ *                 within any of the individual `register...Commands` functions.
+ *                 The error is logged, and then re-thrown to be handled by the caller.
  */
 export function registerAllCommands(server: McpServer): void {
   try {
     logger.info("Registering all commands...");
     // Instantiate Figma client to pass into each command group
-    // Note: Using explicit FigmaClient type instead of 'any' to prevent type issues
     const figmaClient: FigmaClient = new FigmaClient();
-    // Register command categories
-    registerChannelCommand(server, figmaClient);// Register channel commands (communication channel management)
+
+    // Register command categories, passing both server and figmaClient
+    registerChannelCommand(server, figmaClient); // Handles MCP channel operations
     registerComponentCommands(server, figmaClient);
-    registerDocumnentCommands(server, figmaClient);
+    registerDocumnentCommands(server, figmaClient); // Typo: Documnent -> Document
     registerExportCommands(server, figmaClient);
     registerImageCommands(server, figmaClient);
     registerLayoutCommands(server, figmaClient);
@@ -50,10 +79,17 @@ export function registerAllCommands(server: McpServer): void {
     registerSVGCommands(server, figmaClient);
     registerTextCommands(server, figmaClient);
     registerVectorCommands(server, figmaClient);
-    logger.info(MCP_COMMANDS.SET_CORNER_RADIUS);
-    logger.info("All commands registered successfully");
+
+    // Example log to confirm a command constant is accessible (optional)
+    if (MCP_COMMANDS && MCP_COMMANDS.SET_CORNER_RADIUS) {
+      logger.debug(`Command constant check: SET_CORNER_RADIUS = ${MCP_COMMANDS.SET_CORNER_RADIUS}`);
+    } else {
+      logger.debug("MCP_COMMANDS.SET_CORNER_RADIUS not found, commands might not be fully typed or imported.");
+    }
+
+    logger.info("All command categories processed for registration.");
   } catch (error) {
-    logger.error(`Error registering commands: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error(`Error during command registration process: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
   }
 }

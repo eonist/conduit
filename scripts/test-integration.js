@@ -55,7 +55,22 @@ function createInterface() {
   });
 }
 
-// Function to ask the user a question
+/**
+ * Creates a readline interface for user input.
+ * @returns {readline.Interface} The readline interface.
+ */
+function createInterface() {
+  return readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+}
+
+/**
+ * Asks the user a question via the command line.
+ * @param {string} question - The question to ask the user.
+ * @returns {Promise<string>} A promise that resolves to the user's answer.
+ */
 async function askQuestion(question) {
   const rl = createInterface();
   return new Promise(resolve => {
@@ -66,7 +81,11 @@ async function askQuestion(question) {
   });
 }
 
-// Check if port is in use
+/**
+ * Checks if a given port is currently in use.
+ * @param {number} port - The port number to check.
+ * @returns {Promise<boolean>} A promise that resolves to true if the port is in use, false otherwise.
+ */
 function isPortInUse(port) {
   try {
     const server = createServer();
@@ -92,7 +111,10 @@ function isPortInUse(port) {
   }
 }
 
-// Verificar dependencias
+/**
+ * Verifies that necessary dependencies (Bun, MCP SDK) are installed.
+ * Exits the process if dependencies are missing.
+ */
 async function checkDependencies() {
   log.step('Verifying installed dependencies');
   
@@ -121,7 +143,11 @@ async function checkDependencies() {
   }
 }
 
-// Check AI Agent configuration
+/**
+ * Checks the AI Agent (Claude) configuration.
+ * Prompts the user to configure if necessary, unless in a CI environment.
+ * May exit the process if configuration is critical and fails or is skipped.
+ */
 // fixme: disable this code:
 async function checkClaudeConfig() {
   log.step('Verifying AI Agent configuration');
@@ -179,7 +205,11 @@ async function checkClaudeConfig() {
   }
 }
 
-// Start WebSocket server
+/**
+ * Starts the WebSocket server.
+ * Checks if the port is in use and handles accordingly.
+ * @returns {Promise<import('child_process').ChildProcess|null>} A promise that resolves to the server process object, or null if an existing server is used or startup is aborted.
+ */
 async function startWebSocketServer() {
   log.step('Starting WebSocket server');
   
@@ -229,7 +259,11 @@ async function startWebSocketServer() {
   return wsServer;
 }
 
-// Check WebSocket server status
+/**
+ * Checks the status of the WebSocket server by querying its /status endpoint.
+ * Retries up to 3 times if the initial attempt fails.
+ * @returns {Promise<boolean>} A promise that resolves to true if the server is running and responsive, false otherwise.
+ */
 async function checkWebSocketStatus() {
   log.step('Verifying WebSocket server status');
   
@@ -281,7 +315,11 @@ async function checkWebSocketStatus() {
   }
 }
 
-// Check Figma plugin
+/**
+ * Checks if the Figma plugin has been installed by the user.
+ * Provides instructions if not installed. Skips interactive parts in CI.
+ * @returns {Promise<boolean>} A promise that resolves to true if the plugin is installed or if in CI, false otherwise.
+ */
 async function checkFigmaPlugin() {
   log.step('Verifying Figma plugin access');
   
@@ -323,10 +361,20 @@ async function checkFigmaPlugin() {
   }
 }
 
+/**
+ * Runs automated tests for page management MCP commands.
+ * This currently uses a simulated MCP command execution.
+ * @returns {Promise<void>}
+ */
 async function testPageManagementCommands() {
   log.step('Testing page management MCP commands');
 
-  // Helper to simulate MCP command execution (replace with actual call if available)
+  /**
+   * Helper to simulate MCP command execution.
+   * @param {string} command - The MCP command to simulate.
+   * @param {object} [params={}] - The parameters for the command.
+   * @returns {Promise<object>} A promise that resolves to a simulated response.
+   */
   async function executeMcpCommand(command, params = {}) {
     // This is a placeholder. Replace with actual MCP client call if available.
     log.info(`Simulate MCP command: ${command} ${JSON.stringify(params)}`);
