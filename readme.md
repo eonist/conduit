@@ -1,4 +1,4 @@
-⚠️️ This project has been moved here: ⚠️️ [https://github.com/conduit-design](https://github.com/conduit-design)
+⚠️️ This project has been moved here: ⚠️️ [https://github.com/conduit-design/conduit_design](https://github.com/conduit-design/conduit_design)
 
 [![version](https://img.shields.io/badge/version-0.9.8-blue.svg)](https://github.com/eonist/conduit/releases) [![Publish Package to npm](https://github.com/eonist/conduit/actions/workflows/publish.yml/badge.svg)](https://github.com/eonist/conduit/actions/workflows/publish.yml) ![License](https://img.shields.io/badge/license-MIT-green)
 
