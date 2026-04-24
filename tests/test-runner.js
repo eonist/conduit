@@ -13,12 +13,20 @@ let channel;
 
 // --- CLI Argument Parsing ---
 /**
- * Parses command-line arguments into a structured options object.
- * Handles both flags (--flag) and positional arguments.
- * @returns {{_: string[], [key: string]: string|boolean}} Parsed options with flags and positional arguments
+ * Parses command-line arguments from `process.argv.slice(2)` into a structured options object.
+ * It distinguishes between:
+ * - Positional arguments (e.g., `run`, `test_scene_1`), which are collected into an array under the `_` key.
+ * - Flags (e.g., `--channel`, `--verbose`), which are parsed into key-value pairs.
+ *   - If a flag is followed by a value that doesn't start with '--', that value is assigned to the flag's key.
+ *   - If a flag is not followed by such a value (or is the last argument), it's treated as a boolean flag with the value `true`.
+ * @returns {{_: string[], [key: string]: string|boolean}} An object containing parsed command-line options.
+ *   The `_` property holds an array of positional arguments. Other properties correspond to flags.
  * @example
  * // Command: node script.js run --channel abc123 --verbose
  * // Returns: { _: ['run'], channel: 'abc123', verbose: true }
+ *
+ * // Command: node script.js build my_target --optimize
+ * // Returns: { _: ['build', 'my_target'], optimize: true }
  */
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -72,14 +80,19 @@ const CONTAINER_FRAME_CONFIG = {
 };
 
 /**
- * Creates the top-level container frame for organizing all test scenes.
- * Applies horizontal auto-layout with wrapping and consistent spacing.
- * @param {WebSocket} ws - Active WebSocket connection to Figma
- * @param {string} channel - Channel ID for the Figma session
- * @returns {Promise} The container frame ID
- * @throws {Error} When frame creation or auto-layout application fails
+ * Creates the top-level container frame in Figma where all test scenes will be rendered.
+ * This frame is configured with specific auto-layout properties defined in `CONTAINER_FRAME_CONFIG`
+ * (horizontal, wrap, spacing, padding) to organize the scenes visually.
+ * @param {WebSocket} ws - The active WebSocket connection to the Figma plugin.
+ * @param {string} channel - The channel ID for the current Figma session.
+ * @returns {Promise<string|undefined>} A promise that resolves to the ID of the created container frame,
+ * or `undefined` if the frame creation step fails.
+ * @throws {Error} Throws an error if the `runStep` for creating the frame or setting its auto-layout fails.
  * @example
  * const containerId = await createContainerFrame(ws, 'channel123');
+ * if (containerId) {
+ *   // Proceed with tests within this container
+ * }
  */
 async function createContainerFrame(ws, channel) {
   const res = await runStep({
@@ -121,13 +134,29 @@ async function createContainerFrame(ws, channel) {
 
 // --- Main Runner ---
 /**
- * Main entry point for the test runner. Initializes WebSocket connection,
- * joins the specified channel, executes all test scenes, and reports results.
- * @returns {Promise}
- * @throws {Error} When WebSocket connection fails or test execution encounters errors
+ * Main entry point for the test runner script. This asynchronous function orchestrates the entire test execution flow:
+ * 1. Parses command-line arguments using `parseArgs` to get the operation (e.g., 'run') and options (e.g., channel).
+ * 2. Validates the command; currently, only 'run' is supported.
+ * 3. Establishes a WebSocket connection to the Figma plugin backend (defaulting to `ws://localhost:3055`).
+ * 4. Sends a 'join' message to the specified Figma channel upon successful connection.
+ * 5. Calls `createContainerFrame` to create a dedicated frame in Figma for organizing test scene outputs.
+ * 6. Defines a sequence of test scenes (imported from `./scene/` and `./layout/` directories).
+ * 7. Iterates through each scene, calling it with the `results` array (for collecting step outcomes)
+ *    and the `containerFrameId` (so scenes can place their elements within this container).
+ * 8. After all scenes are executed, closes the WebSocket connection.
+ * 9. Prints a summary of all test steps, indicating pass/fail status for each.
+ * 10. Exits the process with a status code: 0 if all tests passed, 1 if any tests failed or an error occurred.
+ * @async
+ * @returns {Promise<void>} A promise that resolves when all tests are completed and results are printed,
+ *                          or rejects if a critical error occurs during setup or execution.
+ * @throws {Error} Can throw an error if WebSocket connection fails, argument parsing is incorrect,
+ *                 or any unhandled exception occurs during test scene execution.
  * @example
- * // Usage: node scripts/test-runner.js run --channel mychannel
- * await main();
+ * // To run tests: node tests/test-runner.js run --channel myChannelId
+ * main().catch(error => {
+ *   console.error("Test runner encountered a fatal error:", error);
+ *   process.exit(1);
+ * });
  */
 async function main() {
   const opts = parseArgs();
