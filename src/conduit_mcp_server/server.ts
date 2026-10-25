@@ -75,9 +75,9 @@ async function main(): Promise<void> {
 
     // Create MCP server
     const server = new McpServer({
-      name: "ClaudeTalkToFigmaMCP",
-      version: "1.0.0",
-      capabilities: { tools: {} }
+      name: "ClaudeTalkToFigmaMCP", // fixme: rename this
+      version: "1.0.0", // fixme: somehow get this from package version or?
+      capabilities: { tools: {} } // fixme: doc this line
     });
 
     // Register all commands
