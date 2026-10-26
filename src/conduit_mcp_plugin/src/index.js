@@ -1,15 +1,30 @@
 /**
- * Main entry point for the Conduit MCP Figma plugin.
- * Initializes the UI panel, registers command handlers, and mediates communication
- * between the Figma plugin environment and the Model Context Protocol server.
+ * Main entry point for the Conduit MCP Figma plugin (main.ts or equivalent in Figma's plugin context).
+ * This module is responsible for:
+ * 1. Displaying the plugin's UI (defined in `ui-template.html` and styled with CSS).
+ * 2. Initializing command handlers available to the UI (via `initializeCommands`).
+ * 3. Handling messages received from the UI (through `figma.ui.onmessage`).
+ * 4. Mediating communication between the Figma plugin environment and the Model Context Protocol (MCP) server.
  *
- * Exposed UI messages:
- * - update-settings(params): Persist plugin settings (e.g., port configuration)
- * - notify(message): Display a Figma notification
- * - close-plugin(): Close the plugin
- * - execute-command(commandName, params): Invoke a registered command on the MCP server
+ * Messages sent from the UI to this plugin backend:
+ * - `update-settings`: Updates and persists plugin settings (e.g., port, auto-connect preferences).
+ *   - `params`: The settings object to update.
+ * - `notify`: Displays a Figma notification message.
+ *   - `message`: The string to display in the notification.
+ * - `close-plugin`: Closes the plugin panel.
+ * - `execute-command`: Requests execution of a registered command on the MCP server.
+ *   - `id`: A unique identifier for the command request, used to correlate with the result.
+ *   - `command`: The name of the command to execute.
+ *   - `params`: Parameters for the command.
  *
- * @module index
+ * Messages sent from this plugin backend to the UI:
+ * - `command-result`: Contains the successful result of an `execute-command` request.
+ * - `command-error`: Contains error details if an `execute-command` request fails.
+ * - `auto-connect`: Sent when the plugin is run, instructing the UI to attempt connection.
+ * - `settings-updated`: Confirms settings have been updated (potentially with the full settings object).
+ * - `progress-update`: (If used) Sends progress information for long-running operations.
+ *
+ * @module PluginIndex
  * @example
  * import './index.js';
  * // The plugin UI is shown automatically and commands are ready to execute
@@ -33,18 +48,28 @@ figma.showUI(__html__, {
 initializeCommands();
 
 /**
- * Handles messages sent from the UI.
+ * Handles incoming messages from the plugin's UI (HTML/JavaScript frontend).
+ * This function acts as a router, delegating actions based on the `msg.type`.
  *
- * Supported message types:
- * - update-settings: Persist plugin settings (e.g., port)
- * - notify: Display a Figma notification
- * - close-plugin: Terminate the plugin
- * - execute-command: Invoke a registered command and return its result
+ * Supported message types from the UI:
+ * - `update-settings`: Persists plugin settings. Expects `msg.params` with settings data.
+ * - `notify`: Shows a Figma notification. Expects `msg.message` with the notification text.
+ * - `close-plugin`: Closes the plugin window.
+ * - `execute-command`: Executes a command via `handleCommand`. Expects `msg.id` (for tracking),
+ *   `msg.command` (command name), and `msg.params` (command arguments).
+ *   It sends back `command-result` or `command-error` to the UI.
  *
- * @param {{ type: string, id?: string, command?: string, params?: any, message?: string }} msg
+ * @param {object} msg - The message object received from the UI.
+ * @param {string} msg.type - The type of the message, determining the action to take.
+ * @param {string} [msg.id] - Optional unique ID for messages that expect a response (e.g., `execute-command`).
+ * @param {string} [msg.command] - Optional command name, typically for `execute-command`.
+ * @param {any} [msg.params] - Optional parameters associated with the message, e.g., settings object or command parameters.
+ * @param {string} [msg.message] - Optional message string, typically for `notify`.
  * @returns {void}
  * @example
- * figma.ui.postMessage({ pluginMessage: { type: 'notify', message: 'Hello' } });
+ * // In UI JavaScript:
+ * // parent.postMessage({ pluginMessage: { type: 'notify', message: 'Hello from UI!' } }, '*');
+ * // parent.postMessage({ pluginMessage: { type: 'execute-command', id: 'cmd1', command: 'get_selection', params: {} } }, '*');
  */
 figma.ui.onmessage = async (msg) => {
   switch (msg.type) {
@@ -106,17 +131,26 @@ figma.ui.onmessage = async (msg) => {
 };
 
 /**
- * Invoked when the plugin is run from the Figma menu.
- * Automatically triggers a WebSocket connection to the MCP server.
+ * Event listener triggered when the plugin is launched or re-launched from the Figma menu
+ * or via a quick launch command.
+ * Its primary role here is to send an 'auto-connect' message to the UI,
+ * prompting the UI to attempt a WebSocket connection to the MCP server if auto-connect is enabled,
+ * or to display the connection panel.
  *
- * @param {{ command: string }} args - The command that launched the plugin
+ * @param {object} runEvent - The event object provided by Figma when the plugin is run.
+ * @param {string} runEvent.command - If the plugin was run via a command defined in the manifest,
+ *                                    this is the command string. Otherwise, it's an empty string.
  * @returns {void}
  * @example
- * // In manifest.json:
- * // { "command": "Auto Connect", "name": "Auto-Connect" }
- * figma.on('run', ({ command }) => { ... });
+ * // In manifest.json, if you have a specific run command:
+ * // { "main": "dist/index.js", "ui": "dist/ui.html", "id": "123", "name": "MyPlugin",
+ * //   "menu": [{ "name": "Open MyPlugin", "command": "open" }] }
+ * // When "Open MyPlugin" is clicked, figma.on('run', ({ command }) => { ... }) is called with command === "open".
  */
 figma.on('run', ({ command }) => {
+  // The 'command' parameter here refers to commands defined in manifest.json for 'menu' or 'quicklaunch'.
+  // For a general plugin run (e.g., clicking its icon in the sidebar), 'command' might be empty.
+  // Regardless, we always want to signal the UI to check its connection status or attempt auto-connect.
   figma.ui.postMessage({ type: 'auto-connect' });
 });
 

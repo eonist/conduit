@@ -1,12 +1,30 @@
 /**
- * Message Handler for the Conduit MCP Figma plugin.
- * Processes incoming and outgoing messages between the WebSocket and plugin.
+ * @file Message Handler for the Conduit MCP Figma plugin UI.
+ * @module MessageHandler
+ * This script is responsible for the bi-directional flow of messages between:
+ * 1. The plugin UI (this JavaScript environment).
+ * 2. The Figma plugin's main execution thread (src/conduit_mcp_plugin/src/index.js).
+ * 3. The WebSocket server (src/conduit_mcp_server/server/websocket.ts).
+ *
+ * It manages command request-response cycles, including attempts to correlate
+ * responses with original request IDs, which can sometimes be missing or ambiguous.
  */
 
 /**
- * Stores a map of command types to their original request IDs for tracking responses.
+ * Global map to store command types and their associated request IDs, timestamps, and parameters.
+ * This is crucial for tracking responses, especially when the original request ID might be missing
+ * from a response originating from the Figma plugin's main thread or when the WebSocket server
+ * initiates a command. The timestamp helps in retrieving the most recent command ID for a type,
+ * and params can be useful for debugging or providing context.
+ *
+ * Each key is a command name (string), and the value is an array of objects,
+ * where each object represents a command invocation.
+ *
  * @global
  * @type {Map<string, Array<{id: string, timestamp: number, params: any}>>}
+ * @property {string} id - The unique ID of the command request.
+ * @property {number} timestamp - The time the command was recorded (ms since epoch).
+ * @property {any} params - The parameters sent with the command.
  */
 if (!window.commandIdMap) {
   window.commandIdMap = new Map();
@@ -14,12 +32,24 @@ if (!window.commandIdMap) {
 
 
 /**
- * Handles incoming messages from the WebSocket server.
- * Resolves or rejects pending requests, or dispatches new commands to the plugin code.
+ * Handles messages received from the WebSocket server.
+ * These messages can be:
+ * 1. Responses to commands initiated by this plugin UI (e.g., a call to `sendFigmaCommand`).
+ *    In this case, the message will have an `id` that matches a pending request,
+ *    and the corresponding Promise is resolved or rejected.
+ * 2. New commands initiated by the WebSocket server, intended for the Figma plugin.
+ *    These are logged in `window.commandIdMap` and then posted to the Figma plugin's
+ *    main thread for execution.
+ *
  * @async
- * @param {object} payload - The message payload from the WebSocket server.
- * @param {object} payload.message - The actual message data.
- * @returns {Promise<void>}
+ * @param {object} payload - The raw payload object from the WebSocket `onmessage` event.
+ * @param {object} payload.message - The actual message data from the server.
+ * @param {string} [payload.message.id] - The ID of the message, used for correlating responses.
+ * @param {string} [payload.message.command] - The command name, if the server is initiating a command.
+ * @param {any} [payload.message.params] - Parameters for the command.
+ * @param {any} [payload.message.result] - The result of a command, if it's a response.
+ * @param {string} [payload.message.error] - An error message, if a command failed.
+ * @returns {Promise<void>} Resolves once the message has been processed.
  */
 async function handleSocketMessage(payload) {
   const data = payload.message;
@@ -84,10 +114,13 @@ async function handleSocketMessage(payload) {
 
 
 /**
- * Finds the most recent command ID for a given command type.
- * Used for correlating responses with original requests.
- * @param {string} commandType - The command type to search for.
- * @returns {string|null} The most recent command ID, or null if not found.
+ * Finds the most recent command ID recorded for a given command type.
+ * This is used to correlate responses from the Figma plugin's main thread when the original
+ * request ID might be missing. It sorts the recorded command entries by timestamp
+ * in descending order and returns the ID of the most recent one.
+ *
+ * @param {string} commandType - The command type (e.g., 'get_selection', 'create_rectangle') to search for.
+ * @returns {string|null} The most recent command ID if found, otherwise null.
  */
 function findCommandId(commandType) {
   if (!window.commandIdMap || !window.commandIdMap.has(commandType)) {
@@ -110,14 +143,42 @@ function findCommandId(commandType) {
 
 
 /**
- * Initializes the event listener for messages from the plugin code.
- * Handles connection status, auto-connect/disconnect, command results, errors, and progress updates.
+ * Initializes the global `window.onmessage` event listener. This listener handles messages
+ * sent from the Figma plugin's main execution thread (e.g., `figma.ui.postMessage(...)` in `index.js`).
+ * It routes these messages based on their `type` to various UI update functions or
+ * forwards command results/errors back to the WebSocket server.
+ *
  * @returns {void}
  */
 function initMessageListener() {
   /**
-   * Handles messages sent from the plugin code to the UI.
-   * @param {MessageEvent} event - The message event from the plugin code.
+   * Global event handler for messages received from the Figma plugin's main thread.
+   *
+   * Structure of `event.data.pluginMessage`:
+   * - `type: "connection-status"`: Updates UI with connection status.
+   *   - `connected: boolean`
+   *   - `message?: string`
+   * - `type: "auto-connect"`: Triggers a click on the connect button.
+   * - `type: "auto-disconnect"`: Triggers a click on the disconnect button.
+   * - `type: "command-result"`: Forwards successful command results to WebSocket.
+   *   - `id?: string` (original request ID, sometimes needs recovery)
+   *   - `result: any`
+   *   - `command?: string` (sometimes included in result, aids ID recovery)
+   * - `type: "command-error"`: Forwards command errors to WebSocket.
+   *   - `id?: string` (original request ID, sometimes needs recovery)
+   *   - `error: string`
+   * - `type: "command_progress"`: Updates UI and forwards progress to WebSocket.
+   *   - `id: string` (original request ID)
+   *   - `progress?: number` (e.g., 0-100)
+   *   - `status?: string` (e.g., 'processing', 'completed')
+   *   - `data?: any` (additional progress data)
+   *
+   * The handler includes logic to recover missing `id` for `command-result` and
+   * `command-error` by using `findCommandId` or searching `window.commandIdMap`.
+   *
+   * @param {MessageEvent} event - The DOM `MessageEvent` object.
+   * @param {object} event.data - The data sent from the plugin's main thread.
+   * @param {object} event.data.pluginMessage - The actual message payload.
    * @returns {void}
    */
   window.onmessage = (event) => {
